@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 st.set_page_config(page_title="AgriApp Cloud", layout="centered")
 register_heif_opener()
 
-def analizza_cartina(uploaded_file):
+def analizza_cartina(uploaded_file, nome_personalizzato):
     image_bytes = uploaded_file.read()
     try:
         if uploaded_file.name.lower().endswith('.heic'):
@@ -74,7 +74,7 @@ def analizza_cartina(uploaded_file):
     img_rosse[mask_bagnata > 0] = [0, 0, 255]
 
     dati = {
-        "file": uploaded_file.name, "area_reale": area_reale, "bagnatura": perc_bag,
+        "file": nome_personalizzato, "area_reale": area_reale, "bagnatura": perc_bag,
         "area_bag": area_bag, "gocce": num_gocce, "densita": num_gocce/area_reale,
         "pulita": 100 - perc_bag, "dist": classi
     }
@@ -100,20 +100,36 @@ st.title("💧 AgriApp - Database Cloud")
 if "URL_FOGLIO" not in st.secrets: st.warning("⚠️ Manca la configurazione dei Secrets!")
 
 files = st.file_uploader("Scatta cartine", type=['jpg', 'jpeg', 'png', 'heic'], accept_multiple_files=True)
-if files and st.button("🚀 Analizza e Salva su Google Sheets"):
+
+if files:
+    st.markdown("### 📝 Rinomina le tue acquisizioni")
+    nomi_personalizzati = {}
+    
+    # Crea un campo di testo per ogni file caricato
     for f in files:
-        res, err = analizza_cartina(f)
-        if err: st.error(err)
-        else:
-            img, dati = res
-            col1, col2 = st.columns([1,1])
-            col1.image(img, use_container_width=True)
-            with col2:
-                st.success(f"Bagnatura: {dati['bagnatura']:.1f}%")
-                st.info(f"Densità: {dati['densita']:.1f} g/cm²")
+        # Se f.name è troppo lungo o incomprensibile, l'utente può sostituirlo facilmente
+        nome_inserito = st.text_input(f"Scegli il nome per: {f.name}", value=f.name, key=f.name)
+        nomi_personalizzati[f.name] = nome_inserito
+        
+    if st.button("🚀 Analizza e Salva su Google Sheets"):
+        for f in files:
+            nome_da_salvare = nomi_personalizzati[f.name]
+            st.write("---")
+            st.subheader(f"📄 Elaborazione: {nome_da_salvare}")
             
-            with st.spinner("Salvataggio su cloud..."):
-                ok, err_gs = salva_su_google_sheets(dati)
-                if ok: st.toast(f"✅ Salvato: {f.name}", icon="☁️")
-                else: st.error(f"Errore cloud: {err_gs}")
-    st.balloons()
+            res, err = analizza_cartina(f, nome_da_salvare)
+            if err: 
+                st.error(err)
+            else:
+                img, dati = res
+                col1, col2 = st.columns([1,1])
+                col1.image(img, use_container_width=True)
+                with col2:
+                    st.success(f"Bagnatura: {dati['bagnatura']:.1f}%")
+                    st.info(f"Densità: {dati['densita']:.1f} g/cm²")
+                
+                with st.spinner("Salvataggio su cloud..."):
+                    ok, err_gs = salva_su_google_sheets(dati)
+                    if ok: st.toast(f"✅ Salvato: {nome_da_salvare}", icon="☁️")
+                    else: st.error(f"Errore cloud: {err_gs}")
+        st.balloons()
