@@ -7,9 +7,16 @@ import json
 import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from openpyxl import Workbook
 
-st.set_page_config(page_title="AgriApp - Gestione Progetti", layout="centered")
+st.set_page_config(page_title="AgriApp - Gestione Progetti", layout="wide")
 register_heif_opener()
+
+# --- VARIABILI DI STATO (Per gestire i reset e la memoria dell'app) ---
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+if "go_home" not in st.session_state:
+    st.session_state.go_home = False
 
 # ==========================================
 # CONNESSIONE A GOOGLE SHEETS
@@ -25,7 +32,7 @@ def get_spreadsheet():
     return client.open_by_url(url)
 
 # ==========================================
-# MOTORE DI ANALISI IMMAGINI
+# MOTORE DI ANALISI IMMAGINI (Invariato)
 # ==========================================
 def analizza_cartina(uploaded_file, nome_personalizzato):
     image_bytes = uploaded_file.read()
@@ -97,10 +104,20 @@ def analizza_cartina(uploaded_file, nome_personalizzato):
     return (cv2.cvtColor(img_rosse, cv2.COLOR_BGR2RGB), dati), None
 
 # ==========================================
+# GENERATORE EXCEL (Per il download)
+# ==========================================
+def genera_excel_bytes(dati_foglio):
+    wb = Workbook()
+    ws = wb.active
+    for riga in dati_foglio:
+        ws.append(riga)
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+# ==========================================
 # INTERFACCIA WEB (STREAMLIT)
 # ==========================================
-st.title("💧 AgriApp - Area Progetti")
-
 if "URL_FOGLIO" not in st.secrets: 
     st.warning("⚠️ Manca la configurazione dei Secrets!")
     st.stop()
@@ -113,15 +130,32 @@ except Exception as e:
     st.error(f"Impossibile collegarsi al database: {e}")
     st.stop()
 
+# --- BARRA LATERALE (I Nuovi Pulsanti) ---
+with st.sidebar:
+    st.title("⚙️ Comandi Rapidi")
+    if st.button("🔄 Ricarica Server", help="Sincronizza l'app con le ultime modifiche"):
+        st.rerun()
+    
+    if st.button("🏠 Torna alla Home", help="Ritorna alla scelta dei progetti"):
+        st.session_state.go_home = True
+        st.rerun()
+
+# Gestione del pulsante Home (Resetta la scelta del progetto)
+indice_selezionato = 0
+if st.session_state.go_home:
+    st.session_state.go_home = False # Spegniamo il trigger
+    indice_selezionato = 0 # Riportiamo al primo elemento
+
+st.title("💧 AgriApp - Area Progetti")
 st.markdown("### 📁 Gestione Progetti")
 opzioni_menu = ["-- Seleziona un progetto --", "➕ Crea Nuovo Progetto..."] + nomi_progetti
-progetto_scelto = st.selectbox("Scegli il progetto su cui lavorare:", opzioni_menu)
+progetto_scelto = st.selectbox("Scegli il progetto su cui lavorare:", opzioni_menu, index=indice_selezionato)
 
 # ==========================================
-# LOGICA: CREA NUOVO PROGETTO (VERSIONE CORRETTA)
+# LOGICA: CREA NUOVO PROGETTO
 # ==========================================
 if progetto_scelto == "➕ Crea Nuovo Progetto...":
-    st.info("Creando un nuovo progetto verrà generata una nuova scheda nel tuo file Excel originale, mantenendo intatte le tue intestazioni.")
+    st.info("Creando un nuovo progetto verrà generata una nuova scheda nel tuo file Excel originale.")
     nuovo_nome = st.text_input("Inserisci il nome del nuovo progetto:")
     
     if st.button("Genera Progetto"):
@@ -132,13 +166,9 @@ if progetto_scelto == "➕ Crea Nuovo Progetto...":
         else:
             with st.spinner("Creazione del progetto in corso..."):
                 try:
-                    # Duplica il primo foglio (che funge da template originale)
                     nuovo_foglio = sh.duplicate_sheet(fogli_esistenti[0].id, new_sheet_name=nuovo_nome)
-                    
-                    # SVUOTA SOLO IL CONTENUTO: Mantiene intatti griglie, bordi, colori e formati numerici delle celle!
                     if nuovo_foglio.row_count > 1:
                         nuovo_foglio.batch_clear([f"A2:M{nuovo_foglio.row_count}"])
-                        
                     st.success(f"Progetto '{nuovo_nome}' creato con successo!")
                     st.rerun() 
                 except Exception as e:
@@ -148,24 +178,60 @@ if progetto_scelto == "➕ Crea Nuovo Progetto...":
 # LOGICA: PROGETTO ESISTENTE
 # ==========================================
 elif progetto_scelto != "-- Seleziona un progetto --":
+    foglio_attivo = sh.worksheet(progetto_scelto)
     
-    with st.expander("✏️ Rinomina questo progetto"):
-        nuovo_nome_rinomina = st.text_input("Nuovo nome:", value=progetto_scelto)
-        if st.button("Salva Modifica"):
-            if nuovo_nome_rinomina != progetto_scelto:
-                if nuovo_nome_rinomina in nomi_progetti:
-                    st.error("Esiste già un progetto con questo nome.")
-                else:
-                    with st.spinner("Rinominando..."):
-                        foglio_da_modificare = sh.worksheet(progetto_scelto)
-                        foglio_da_modificare.update_title(nuovo_nome_rinomina)
-                        st.success("Nome aggiornato!")
-                        st.rerun()
+    # --- ZONA OPZIONI PROGETTO (Rinomina, Elimina, Scarica) ---
+    colA, colB, colC = st.columns(3)
     
+    with colA:
+        with st.expander("✏️ Rinomina Progetto"):
+            nuovo_nome_rinomina = st.text_input("Nuovo nome:", value=progetto_scelto)
+            if st.button("Salva Modifica"):
+                if nuovo_nome_rinomina != progetto_scelto and nuovo_nome_rinomina not in nomi_progetti:
+                    foglio_attivo.update_title(nuovo_nome_rinomina)
+                    st.success("Nome aggiornato!")
+                    st.rerun()
+    
+    with colB:
+        with st.expander("⬇️ Scarica Excel"):
+            st.write("Scarica una copia locale dei dati.")
+            dati_raw = foglio_attivo.get_all_values()
+            excel_bytes = genera_excel_bytes(dati_raw)
+            st.download_button(
+                label="📥 Scarica file .xlsx",
+                data=excel_bytes,
+                file_name=f"{progetto_scelto}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    with colC:
+        with st.expander("🗑️ Elimina Progetto"):
+            st.error("⚠️ Attenzione: Azione irreversibile!")
+            conferma = st.checkbox("Confermo di voler eliminare questo progetto.")
+            if conferma and st.button("❌ Elimina definitivamente"):
+                sh.del_worksheet(foglio_attivo)
+                st.session_state.go_home = True
+                st.rerun()
+
     st.write("---")
     st.markdown(f"### 📷 Acquisizione Dati: **{progetto_scelto}**")
     
-    files = st.file_uploader("Scatta o carica cartine", type=['jpg', 'jpeg', 'png', 'heic'], accept_multiple_files=True)
+    # --- ZONA CARICAMENTO E PULIZIA IMMAGINI ---
+    col_up1, col_up2 = st.columns([3, 1])
+    with col_up1:
+        # Nota: La chiave dinamica permette di "svuotare" il componente ricreandolo
+        files = st.file_uploader(
+            "Scatta o carica cartine (Usa la 'X' vicino al nome per scartarne una)", 
+            type=['jpg', 'jpeg', 'png', 'heic'], 
+            accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_key}"
+        )
+    with col_up2:
+        st.write("") # Spazio vuoto per allineamento
+        st.write("")
+        if st.button("🗑️ Svuota Tutto"):
+            st.session_state.uploader_key += 1 # Questo resetta il caricatore!
+            st.rerun()
 
     if files:
         st.markdown("📝 **Rinomina le tue acquisizioni prima del salvataggio:**")
@@ -175,8 +241,6 @@ elif progetto_scelto != "-- Seleziona un progetto --":
             nomi_personalizzati[f.name] = nome_inserito
             
         if st.button(f"🚀 Analizza e Salva in '{progetto_scelto}'"):
-            foglio_destinazione = sh.worksheet(progetto_scelto)
-            
             for f in files:
                 nome_da_salvare = nomi_personalizzati[f.name]
                 st.write("---")
@@ -187,9 +251,9 @@ elif progetto_scelto != "-- Seleziona un progetto --":
                     st.error(err)
                 else:
                     img, dati = res
-                    col1, col2 = st.columns([1,1])
-                    col1.image(img, use_container_width=True)
-                    with col2:
+                    col_res1, col_res2 = st.columns([1,1])
+                    col_res1.image(img, use_container_width=True)
+                    with col_res2:
                         st.success(f"Bagnatura: {dati['bagnatura']:.1f}%")
                         st.info(f"Densità: {dati['densita']:.1f} g/cm²")
                     
@@ -200,7 +264,7 @@ elif progetto_scelto != "-- Seleziona un progetto --":
                                 dati['gocce'], dati['densita'], dati['pulita']/100.0,
                                 dati['dist']['micro'], dati['dist']['piccole'], dati['dist']['medie'], dati['dist']['grandi'], dati['dist']['extra']
                             ]
-                            foglio_destinazione.append_row(riga, value_input_option="USER_ENTERED")
+                            foglio_attivo.append_row(riga, value_input_option="USER_ENTERED")
                             st.toast(f"✅ Salvato: {nome_da_salvare}", icon="☁️")
                         except Exception as e:
                             st.error(f"Errore di salvataggio: {e}")
