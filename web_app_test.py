@@ -8,9 +8,25 @@ import io
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-st.set_page_config(page_title="AgriApp Cloud", layout="centered")
+st.set_page_config(page_title="AgriApp - Gestione Progetti", layout="centered")
 register_heif_opener()
 
+# ==========================================
+# CONNESSIONE A GOOGLE SHEETS
+# ==========================================
+def get_spreadsheet():
+    url = st.secrets["URL_FOGLIO"]
+    creds_dict = json.loads(st.secrets["CHIAVE_JSON"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        creds_dict, 
+        ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    )
+    client = gspread.authorize(creds)
+    return client.open_by_url(url)
+
+# ==========================================
+# MOTORE DI ANALISI IMMAGINI
+# ==========================================
 def analizza_cartina(uploaded_file, nome_personalizzato):
     image_bytes = uploaded_file.read()
     try:
@@ -33,7 +49,7 @@ def analizza_cartina(uploaded_file, nome_personalizzato):
     mask_cartina_fisica = cv2.morphologyEx(mask_cartina_fisica, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
 
     contours, _ = cv2.findContours(mask_cartina_fisica, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours: return None, "Nessuna cartina."
+    if not contours: return None, "Nessuna cartina individuata."
 
     x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
     y1, y2 = max(0, y - 40), min(img.shape[0], y + h + 40)
@@ -80,56 +96,118 @@ def analizza_cartina(uploaded_file, nome_personalizzato):
     }
     return (cv2.cvtColor(img_rosse, cv2.COLOR_BGR2RGB), dati), None
 
-def salva_su_google_sheets(dati):
-    try:
-        url = st.secrets["URL_FOGLIO"]
-        creds_dict = json.loads(st.secrets["CHIAVE_JSON"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
-        sheet = gspread.authorize(creds).open_by_url(url).sheet1
-        
-        riga = [
-            dati['file'], "76 x 26", dati['area_reale'], dati['bagnatura']/100.0, dati['area_bag'],
-            dati['gocce'], dati['densita'], dati['pulita']/100.0,
-            dati['dist']['micro'], dati['dist']['piccole'], dati['dist']['medie'], dati['dist']['grandi'], dati['dist']['extra']
-        ]
-        sheet.append_row(riga, value_input_option="USER_ENTERED")
-        return True, ""
-    except Exception as e: return False, str(e)
+# ==========================================
+# INTERFACCIA WEB (STREAMLIT)
+# ==========================================
+st.title("💧 AgriApp - Area Progetti")
 
-st.title("💧 AgriApp - Database Cloud")
-if "URL_FOGLIO" not in st.secrets: st.warning("⚠️ Manca la configurazione dei Secrets!")
+if "URL_FOGLIO" not in st.secrets: 
+    st.warning("⚠️ Manca la configurazione dei Secrets!")
+    st.stop()
 
-files = st.file_uploader("Scatta cartine", type=['jpg', 'jpeg', 'png', 'heic'], accept_multiple_files=True)
+# 1. Carica il documento e tutti i progetti (fogli) esistenti
+try:
+    sh = get_spreadsheet()
+    fogli_esistenti = sh.worksheets()
+    nomi_progetti = [f.title for f in fogli_esistenti]
+except Exception as e:
+    st.error(f"Impossibile collegarsi al database: {e}")
+    st.stop()
 
-if files:
-    st.markdown("### 📝 Rinomina le tue acquisizioni")
-    nomi_personalizzati = {}
+st.markdown("### 📁 Gestione Progetti")
+# Aggiungiamo le opzioni speciali al menù a tendina
+opzioni_menu = ["-- Seleziona un progetto --", "➕ Crea Nuovo Progetto..."] + nomi_progetti
+progetto_scelto = st.selectbox("Scegli il progetto su cui lavorare:", opzioni_menu)
+
+# ==========================================
+# LOGICA: CREA NUOVO PROGETTO
+# ==========================================
+if progetto_scelto == "➕ Crea Nuovo Progetto...":
+    st.info("Creando un nuovo progetto verrà generata una nuova scheda nel tuo file Excel originale, mantenendo intatte le tue intestazioni.")
+    nuovo_nome = st.text_input("Inserisci il nome del nuovo progetto:")
     
-    # Crea un campo di testo per ogni file caricato
-    for f in files:
-        # Se f.name è troppo lungo o incomprensibile, l'utente può sostituirlo facilmente
-        nome_inserito = st.text_input(f"Scegli il nome per: {f.name}", value=f.name, key=f.name)
-        nomi_personalizzati[f.name] = nome_inserito
-        
-    if st.button("🚀 Analizza e Salva su Google Sheets"):
+    if st.button("Genera Progetto"):
+        if nuovo_nome in nomi_progetti:
+            st.error("Esiste già un progetto con questo nome! Scegline un altro.")
+        elif nuovo_nome == "":
+            st.warning("Il nome non può essere vuoto.")
+        else:
+            with st.spinner("Creazione del progetto in corso..."):
+                try:
+                    # Duplica il primo foglio (che funge da template originale)
+                    nuovo_foglio = sh.duplicate_sheet(fogli_esistenti[0].id, new_sheet_name=nuovo_nome)
+                    
+                    # Svuota i dati vecchi copiati per sbaglio, lasciando intatta la Riga 1 (Intestazione)
+                    if nuovo_foglio.row_count > 1:
+                        nuovo_foglio.delete_rows(2, nuovo_foglio.row_count)
+                        
+                    st.success(f"Progetto '{nuovo_nome}' creato con successo!")
+                    st.rerun() # Riavvia l'app per aggiornare il menù a tendina
+                except Exception as e:
+                    st.error(f"Errore durante la creazione: {e}")
+
+# ==========================================
+# LOGICA: PROGETTO ESISTENTE (Rinomina & Analisi)
+# ==========================================
+elif progetto_scelto != "-- Seleziona un progetto --":
+    
+    # --- SEZIONE RINOMINA ---
+    with st.expander("✏️ Rinomina questo progetto"):
+        nuovo_nome_rinomina = st.text_input("Nuovo nome:", value=progetto_scelto)
+        if st.button("Salva Modifica"):
+            if nuovo_nome_rinomina != progetto_scelto:
+                if nuovo_nome_rinomina in nomi_progetti:
+                    st.error("Esiste già un progetto con questo nome.")
+                else:
+                    with st.spinner("Rinominando..."):
+                        foglio_da_modificare = sh.worksheet(progetto_scelto)
+                        foglio_da_modificare.update_title(nuovo_nome_rinomina)
+                        st.success("Nome aggiornato!")
+                        st.rerun()
+    
+    st.write("---")
+    st.markdown(f"### 📷 Acquisizione Dati: **{progetto_scelto}**")
+    
+    # --- SEZIONE ANALISI E FOTO ---
+    files = st.file_uploader("Scatta o carica cartine", type=['jpg', 'jpeg', 'png', 'heic'], accept_multiple_files=True)
+
+    if files:
+        st.markdown("📝 **Rinomina le tue acquisizioni prima del salvataggio:**")
+        nomi_personalizzati = {}
         for f in files:
-            nome_da_salvare = nomi_personalizzati[f.name]
-            st.write("---")
-            st.subheader(f"📄 Elaborazione: {nome_da_salvare}")
+            nome_inserito = st.text_input(f"Nome per: {f.name}", value=f.name, key=f.name)
+            nomi_personalizzati[f.name] = nome_inserito
             
-            res, err = analizza_cartina(f, nome_da_salvare)
-            if err: 
-                st.error(err)
-            else:
-                img, dati = res
-                col1, col2 = st.columns([1,1])
-                col1.image(img, use_container_width=True)
-                with col2:
-                    st.success(f"Bagnatura: {dati['bagnatura']:.1f}%")
-                    st.info(f"Densità: {dati['densita']:.1f} g/cm²")
+        if st.button(f"🚀 Analizza e Salva in '{progetto_scelto}'"):
+            foglio_destinazione = sh.worksheet(progetto_scelto) # Selezioniamo il foglio corretto
+            
+            for f in files:
+                nome_da_salvare = nomi_personalizzati[f.name]
+                st.write("---")
+                st.subheader(f"📄 Elaborazione: {nome_da_salvare}")
                 
-                with st.spinner("Salvataggio su cloud..."):
-                    ok, err_gs = salva_su_google_sheets(dati)
-                    if ok: st.toast(f"✅ Salvato: {nome_da_salvare}", icon="☁️")
-                    else: st.error(f"Errore cloud: {err_gs}")
-        st.balloons()
+                res, err = analizza_cartina(f, nome_da_salvare)
+                if err: 
+                    st.error(err)
+                else:
+                    img, dati = res
+                    col1, col2 = st.columns([1,1])
+                    col1.image(img, use_container_width=True)
+                    with col2:
+                        st.success(f"Bagnatura: {dati['bagnatura']:.1f}%")
+                        st.info(f"Densità: {dati['densita']:.1f} g/cm²")
+                    
+                    with st.spinner("Salvataggio nel progetto..."):
+                        try:
+                            riga = [
+                                dati['file'], "76 x 26", dati['area_reale'], dati['bagnatura']/100.0, dati['area_bag'],
+                                dati['gocce'], dati['densita'], dati['pulita']/100.0,
+                                dati['dist']['micro'], dati['dist']['piccole'], dati['dist']['medie'], dati['dist']['grandi'], dati['dist']['extra']
+                            ]
+                            # Salviamo specificatamente nel foglio scelto
+                            foglio_destinazione.append_row(riga, value_input_option="USER_ENTERED")
+                            st.toast(f"✅ Salvato: {nome_da_salvare}", icon="☁️")
+                        except Exception as e:
+                            st.error(f"Errore di salvataggio: {e}")
+            
+            st.balloons()
