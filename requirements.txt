@@ -4,3 +4,5 @@ numpy
 Pillow
 pillow-heif
 openpyxl
+gspread
+oauth2client
